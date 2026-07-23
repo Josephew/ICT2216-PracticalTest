@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  # Q5(part): "UI testing" via ESLint (static analysis stand-in — see README
+  # for the caveat on this vs. a dedicated UI test framework).
+  # Q6: eslint-plugin-security is included in both configs, so this same
+  # job doubles as the security-scanning step.
+  eslint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm install
+
+      - name: Lint frontend (incl. eslint-plugin-security)
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Install backend deps
+        working-directory: backend
+        run: npm install
+
+      - name: Lint backend (incl. eslint-plugin-security)
+        working-directory: backend
+        run: npm run lint
+
+  # Q5(part): dependency vulnerability scanning via OWASP Dependency-Check.
+  dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        id: depcheck
+        with:
+          project: 'ICT2216-PracticalTest'
+          path: '.'
+          format: 'HTML'
+          # NVD API key is optional but avoids severe rate-limiting; add one
+          # as a repo secret (Settings -> Secrets -> Actions -> NVD_API_KEY)
+          # if scans start failing/timing out on the NVD feed download.
+          args: >
+            --enableExperimental
+            --exclude "**/node_modules/**"
+            ${{ secrets.NVD_API_KEY && format('--nvdApiKey {0}', secrets.NVD_API_KEY) || '' }}
+
+      - name: Upload Dependency-Check report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: ${{ github.workspace }}/reports
+
+  # Q5(part): integration testing over HTTP against the running application.
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start backend + database
+        run: docker compose up -d --build db backend
+
+      - name: Wait for backend to become healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health; then
+              echo "Backend is up"
+              exit 0
+            fi
+            echo "Waiting for backend... ($i)"
+            sleep 2
+          done
+          echo "Backend did not become healthy in time"
+          docker compose logs backend
+          exit 1
+
+      - name: Integration test - valid search term is accepted
+        run: |
+          status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -X POST http://localhost:3000/search \
+            -H "Content-Type: application/json" \
+            -d '{"query":"integration test term"}')
+          echo "Status: $status"; cat /tmp/resp.json
+          test "$status" -eq 200
+
+      - name: Integration test - SQLi/XSS payload is rejected
+        run: |
+          status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -X POST http://localhost:3000/search \
+            -H "Content-Type: application/json" \
+            -d '{"query":"<script>alert(1)</script>"}')
+          echo "Status: $status"; cat /tmp/resp.json
+          test "$status" -eq 400
+
+      - name: Integration test - oversized input is rejected
+        run: |
+          status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -X POST http://localhost:3000/search \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"$(python3 -c 'print("a"*200)')\"}")
+          echo "Status: $status"; cat /tmp/resp.json
+          test "$status" -eq 400
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
