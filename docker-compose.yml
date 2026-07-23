@@ -1,10 +1,8 @@
-version: "3.9"
-
 services:
 
   # ---------- Q1 / Q2: Web server (HTTPS via self-signed cert) ----------
   webserver:
-    image: nginx:1.27-alpine
+    build: ./frontend
     container_name: webserver
     ports:
       - "80:80"
@@ -12,12 +10,11 @@ services:
     volumes:
       - ./nginx/conf/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./nginx/certs:/etc/nginx/certs:ro
-      - ./frontend/build:/usr/share/nginx/html:ro
     depends_on:
       - backend
     restart: unless-stopped
 
-  # ---------- Q4: Backend API (added in the next step) ----------
+  # ---------- Q4: Backend API ----------
   backend:
     build: ./backend
     container_name: backend
@@ -27,11 +24,13 @@ services:
       - DB_PASSWORD=apppassword
       - DB_NAME=searchapp
       - PORT=3000
+    ports:
+      - "3000:3000"
     depends_on:
       - db
     restart: unless-stopped
 
-  # ---------- Q4i: Database to store validated search queries ----------
+  # ---------- Q4(i): Database to store validated search queries ----------
   db:
     image: postgres:16-alpine
     container_name: search_db
@@ -55,10 +54,22 @@ services:
       - USER_GID=1000
       - GITEA__server__ROOT_URL=http://127.0.0.1:3001/
       - GITEA__server__HTTP_PORT=3000
+      # Using Postgres instead of the default embedded SQLite: SQLite's file
+      # locking model doesn't survive Docker Desktop's Windows bind-mount
+      # layer well and can corrupt ("database disk image is malformed") on
+      # an unclean stop/restart. Postgres is already in this stack (Q4), so
+      # we reuse it for Gitea's metadata too, in a separate database.
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=db:5432
+      - GITEA__database__NAME=giteadb
+      - GITEA__database__USER=appuser
+      - GITEA__database__PASSWD=apppassword
     volumes:
       - ./gitea/data:/data
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - db
     ports:
       - "3001:3000"   # web UI: http://127.0.0.1:3001
       - "2222:22"     # git over SSH (optional)
